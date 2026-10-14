@@ -1,0 +1,128 @@
+package com.getup.oneui.viewmodel
+
+import com.getup.oneui.model.BatteryDisplayOption
+import com.getup.oneui.model.ClockStyle
+import com.getup.oneui.model.SloganConfig
+import com.getup.oneui.model.WallpaperOption
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class DualScreenViewModelTest {
+
+    private val testDispatcher = StandardTestDispatcher()
+    private lateinit var viewModel: DualScreenViewModel
+
+    @Before
+    fun setUp() {
+        Dispatchers.setMain(testDispatcher)
+        viewModel = DualScreenViewModel()
+    }
+
+    @After
+    fun tearDown() {
+        Dispatchers.resetMain()
+    }
+
+    @Test
+    fun testInitialUiState() {
+        val initialState = viewModel.uiState.value
+        assertEquals(ClockStyle.DIGITAL_BOLD, initialState.clockStyle)
+        assertTrue(initialState.isPresentationEnabled)
+        assertEquals("Welcome to Dual Screen Console", initialState.sloganConfig.text)
+    }
+
+    @Test
+    fun testUpdateClockStyle() {
+        viewModel.updateClockStyle(ClockStyle.ANALOG_CLASSIC)
+        assertEquals(ClockStyle.ANALOG_CLASSIC, viewModel.uiState.value.clockStyle)
+    }
+
+    @Test
+    fun testUpdateWallpaper() {
+        val newWallpaper = WallpaperOption.DEFAULT_COLORS[0]
+        viewModel.updateWallpaper(newWallpaper)
+        assertEquals(newWallpaper, viewModel.uiState.value.wallpaper)
+    }
+
+    @Test
+    fun testUpdateSloganText() {
+        val newSlogan = "Special Announcement!"
+        viewModel.updateSloganText(newSlogan)
+        assertEquals(newSlogan, viewModel.uiState.value.sloganConfig.text)
+    }
+
+    @Test
+    fun testUpdateSloganConfig() {
+        val newConfig = SloganConfig(
+            text = "New Slogan",
+            textColorHex = 0xFFFF0000,
+            fontSizeSp = 36,
+            isMarquee = true
+        )
+        viewModel.updateSloganConfig(newConfig)
+        assertEquals(newConfig, viewModel.uiState.value.sloganConfig)
+    }
+
+    @Test
+    fun testUpdateBatteryOption() {
+        val newBatteryOption = BatteryDisplayOption(
+            isVisible = true,
+            showPercentage = false,
+            style = BatteryDisplayOption.BatteryStyle.CIRCULAR
+        )
+        viewModel.updateBatteryOption(newBatteryOption)
+        assertEquals(newBatteryOption, viewModel.uiState.value.batteryOption)
+    }
+
+    @Test
+    fun testTogglePresentation() {
+        viewModel.togglePresentation(false)
+        assertFalse(viewModel.uiState.value.isPresentationEnabled)
+
+        viewModel.togglePresentation(true)
+        assertTrue(viewModel.uiState.value.isPresentationEnabled)
+    }
+
+    @Test
+    fun testSelectTargetDisplay() {
+        viewModel.selectTargetDisplay(2)
+        assertEquals(2, viewModel.uiState.value.targetDisplayId)
+    }
+
+    @Test
+    fun testUpdateBrightness() {
+        viewModel.updateBrightness(0.5f)
+        assertEquals(0.5f, viewModel.uiState.value.brightnessLevel, 0.001f)
+
+        // Test coercing limits
+        viewModel.updateBrightness(1.5f)
+        assertEquals(1.0f, viewModel.uiState.value.brightnessLevel, 0.001f)
+
+        viewModel.updateBrightness(0.01f)
+        assertEquals(0.1f, viewModel.uiState.value.brightnessLevel, 0.001f)
+    }
+
+    @Test
+    fun testResetToDefaults() {
+        viewModel.updateClockStyle(ClockStyle.ANALOG_MODERN)
+        viewModel.updateSloganText("Custom Text")
+        viewModel.togglePresentation(false)
+
+        viewModel.resetToDefaults()
+
+        val resetState = viewModel.uiState.value
+        assertEquals(ClockStyle.DIGITAL_BOLD, resetState.clockStyle)
+        assertEquals("Welcome to Dual Screen Console", resetState.sloganConfig.text)
+        assertTrue(resetState.isPresentationEnabled)
+    }
+}
