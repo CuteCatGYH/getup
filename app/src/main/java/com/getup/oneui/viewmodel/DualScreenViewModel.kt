@@ -7,9 +7,12 @@ import androidx.annotation.VisibleForTesting
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.getup.oneui.display.DeviceStateMonitor
 import com.getup.oneui.display.DisplayInfo
 import com.getup.oneui.display.DisplayManagerHelper
+import com.getup.oneui.display.FoldPosture
 import com.getup.oneui.display.FoldStateMonitor
+import com.getup.oneui.display.PostureSettleGate
 import com.getup.oneui.display.WindowAreaHelper
 import com.getup.oneui.model.BatteryDisplayOption
 import com.getup.oneui.model.ClockStyle
@@ -29,7 +32,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
@@ -44,29 +46,83 @@ class DualScreenViewModel : ViewModel() {
     // Backed by the shared DualScreenConfigRepository
     val uiState: StateFlow<SecondaryDisplayConfig> = DualScreenConfigRepository.config
 
+    companion object {
+        /**
+         * How long the unfolded state must persist before it is trusted as a genuine
+         * unfold. DeviceStateManager emits TENT/HALF_OPENED/OPENED transitions in rapid
+         * succession during the physical hinge movement; settling avoids acting on the
+         * transient intermediates (which caused spurious auto-starts and false manual-stop
+         * flags during folding).
+         */
+        private const val UNFOLD_SETTLE_MS = 600L
+
+        /**
+         * How long a half-open / tent posture must persist before the UI trusts it as a
+         * *resting* posture (rather than a momentary hinge pass-through). Longer than
+         * [UNFOLD_SETTLE_MS] because a physical hinge movement spends <~500ms in the
+         * intermediate state. Kept in sync with CoverDisplayService.HALF_OPEN_SETTLE_MS.
+         */
+        private const val HALF_OPEN_SETTLE_MS = 900L
+    }
+
     private val _connectedDisplays = MutableStateFlow<List<DisplayInfo>>(emptyList())
     val connectedDisplays: StateFlow<List<DisplayInfo>> = _connectedDisplays.asStateFlow()
-
-    private val _activeDisplayId = MutableStateFlow<Int?>(null)
-    val activeDisplayId: StateFlow<Int?> = _activeDisplayId.asStateFlow()
 
     private val _isPresentationShowing = MutableStateFlow(false)
     val isPresentationShowing: StateFlow<Boolean> = _isPresentationShowing.asStateFlow()
 
-    val isSecondaryDisplayConnected: StateFlow<Boolean> = _connectedDisplays
-        .map { displays -> displays.isNotEmpty() }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = false
-        )
-
     val windowAreaHelper = WindowAreaHelper(viewModelScope)
     val foldStateMonitor = FoldStateMonitor(viewModelScope)
+    private var deviceStateMonitor: DeviceStateMonitor? = null
 
     val isRearDisplayAvailable: StateFlow<Boolean> = windowAreaHelper.isRearDisplayAvailable
     val isRearDisplayActive: StateFlow<Boolean> = windowAreaHelper.isRearDisplayActive
+
+    /**
+     * Authoritative, *settled* fold posture. Prefers the fold monitor's value but falls back
+     * to the crash-safe display-based check when the monitor has not yet observed a change.
+     */
     val isDeviceUnfolded: StateFlow<Boolean> = foldStateMonitor.isDeviceUnfolded
+
+    private val _settledPosture = MutableStateFlow<FoldPosture?>(null)
+
+    /**
+     * The settled posture (see [PostureSettleGate]): steady OPENED, a *resting* half-open
+     * posture, or CLOSED. `null` until first resolved. Drives the UI gate and is exposed so
+     * the console can label the half-open case distinctly from fully-open.
+     */
+    val settledPosture: StateFlow<FoldPosture?> = _settledPosture.asStateFlow()
+
+    /**
+     * True when the device is resting in a (settled) half-open posture. Lets the console
+     * distinguish "半遮（半开）可用" from a fully-unfolded "展开" state.
+     */
+    val isHalfOpenResting: StateFlow<Boolean> = _settledPosture
+        .map { it == FoldPosture.TRANSITIONAL }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = false
+        )
+
+    /**
+     * Whether the user is allowed to attempt enabling dual-screen presentation.
+     *
+     * Keyed on the *settled* posture: a steady OPENED posture always qualifies, and a
+     * RESTING half-open posture qualifies too once it has settled. A momentary hinge
+     * pass-through during a fold/unfold does NOT qualify (see [PostureSettleGate]).
+     *
+     * Deliberately independent of whether a secondary display currently exists: the cover
+     * display does not exist until State 4 is activated, so requiring a display here would
+     * wrongly disable the switch after stopping, and would deadlock the initial auto-start.
+     */
+    val canPresentOnSecondaryDisplay: StateFlow<Boolean> = _settledPosture
+        .map { it?.isUsableForCoverDisplay == true }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = false
+        )
 
     // Shizuku StateFlows
     val isShizukuInstalled: StateFlow<Boolean> = ShizukuHelper.isInstalled
@@ -98,14 +154,17 @@ class DualScreenViewModel : ViewModel() {
     private var activityRef: WeakReference<ComponentActivity>? = null
     private var isAutoStartObserving = false
     private var userManuallyStopped = false
-    private var wasUnfolded = false
+    private var lastServiceRunning = false
+
+    // Settled-posture gate: turns the raw DeviceStateManager burst into a single stable
+    // verdict that also understands a *resting* half-open posture (see PostureSettleGate).
+    private var postureGate: PostureSettleGate? = null
+    private var latestRawPosture: FoldPosture? = null
 
     private data class AutoStartCheck(
-        val isUnfolded: Boolean,
+        val isUsable: Boolean,
         val autoStart: Boolean,
-        val isShizukuAuth: Boolean,
         val isServiceRunning: Boolean,
-        val isRearAvailable: Boolean,
         val isRearActive: Boolean
     )
 
@@ -118,6 +177,37 @@ class DualScreenViewModel : ViewModel() {
             preferences = DualScreenPreferences(activity.applicationContext)
             _autoStartOnUnfold.value = preferences?.autoStartOnUnfold ?: true
             _keepScreenOn.value = preferences?.keepScreenOn ?: true
+        }
+
+        val initialUnfolded = DeviceStateMonitor.isDeviceUnfolded(activity)
+        foldStateMonitor.setDeviceUnfoldedForTest(initialUnfolded)
+
+        // Settle gate: the VM is only alive while the Activity is, but it still needs to
+        // debounce the DSM burst so the UI gate never enables mid-fold.
+        if (postureGate == null) {
+            postureGate = PostureSettleGate(
+                scope = viewModelScope,
+                openedSettleMs = UNFOLD_SETTLE_MS,
+                transitionalSettleMs = HALF_OPEN_SETTLE_MS,
+                postureProvider = { latestRawPosture },
+                logTag = TAG
+            )
+        }
+
+        if (deviceStateMonitor == null) {
+            val dsm = DeviceStateMonitor(activity.applicationContext).apply {
+                startListening()
+            }
+            deviceStateMonitor = dsm
+            viewModelScope.launch {
+                dsm.isUnfolded.collect { unfolded ->
+                    // Feed the authoritative DeviceStateManager signal into both the fold
+                    // monitor (so geometric heuristics can never override a fold) and the
+                    // VM's own unfolded state.
+                    foldStateMonitor.setAuthoritativeUnfoldedForTest(unfolded)
+                    foldStateMonitor.setDeviceUnfoldedForTest(unfolded)
+                }
+            }
         }
 
         ShizukuHelper.init(activity.applicationContext)
@@ -143,52 +233,56 @@ class DualScreenViewModel : ViewModel() {
         if (isAutoStartObserving) return
         isAutoStartObserving = true
 
+        // 1. Feed the authoritative DSM posture into the settle gate. The gate decides when
+        //    a posture is genuinely stable (steady OPENED, or a *resting* half-open posture).
+        viewModelScope.launch {
+            deviceStateMonitor?.posture?.collect { raw ->
+                latestRawPosture = raw
+                postureGate?.onPosture(raw) {
+                    val settled = postureGate?.settledPosture
+                    Log.i(TAG, "Settled posture changed: $settled")
+                    _settledPosture.value = settled
+                    onPostureSettled(settled)
+                }
+            }
+        }
+
+        // 2. React to service-lifecycle changes for the manual-stop detection (Samsung [关闭]).
         viewModelScope.launch {
             combine(
-                foldStateMonitor.isDeviceUnfolded,
+                _settledPosture,
                 _autoStartOnUnfold,
-                ShizukuHelper.isAuthorized,
                 CoverDisplayService.isServiceRunning,
                 windowAreaHelper.isRearDisplayActive
-            ) { isUnfolded, autoStart, isShizukuAuth, serviceRunning, isRearActive ->
+            ) { posture, autoStart, serviceRunning, isRearActive ->
                 AutoStartCheck(
-                    isUnfolded = isUnfolded,
+                    isUsable = posture?.isUsableForCoverDisplay == true,
                     autoStart = autoStart,
-                    isShizukuAuth = isShizukuAuth,
                     isServiceRunning = serviceRunning,
-                    isRearAvailable = windowAreaHelper.isRearDisplayAvailable.value,
                     isRearActive = isRearActive
                 )
             }.collect { check ->
-                if (check.isUnfolded) {
-                    if (!wasUnfolded) {
-                        userManuallyStopped = false
+                if (check.isUsable) {
+                    // If the service was running and stopped while the device was in a STABLE
+                    // usable posture (and the screen is interactive), it means the user tapped
+                    // Samsung's system [关闭] button — mark it as a manual stop.
+                    if (lastServiceRunning && !check.isServiceRunning) {
+                        Log.i(TAG, "Service stopped while posture stable (e.g. Samsung system [关闭] clicked). Marking userManuallyStopped = true")
+                        userManuallyStopped = true
                     }
-                    wasUnfolded = true
-
-                    if (check.autoStart && !userManuallyStopped) {
-                        if (check.isShizukuAuth && !check.isServiceRunning) {
-                            Log.i(TAG, "Unfold auto-start triggered via Shizuku CoverDisplayService")
-                            activityRef?.get()?.let { activity ->
-                                CoverDisplayService.start(activity)
-                            }
-                        } else if (!check.isRearActive && check.isRearAvailable) {
-                            Log.i(TAG, "Unfold auto-start triggered for Samsung rear display (WindowArea)")
-                            activityRef?.get()?.let { activity ->
-                                startRearDisplay(activity)
-                            }
-                        }
-                    }
+                    lastServiceRunning = check.isServiceRunning
                 } else {
-                    wasUnfolded = false
-                    userManuallyStopped = false
+                    lastServiceRunning = check.isServiceRunning
+                    // Anti-accidental touch: stop presenting. We do NOT stop the service here
+                    // when auto-start is enabled — the service owns its own standby lifecycle
+                    // and must survive the fold (the Activity/ViewModel is destroyed on fold).
                     activityRef?.get()?.let { activity ->
-                        if (check.isServiceRunning) {
-                            Log.i(TAG, "Device folded. Stopping CoverDisplayService.")
+                        if (check.isServiceRunning && !_autoStartOnUnfold.value) {
+                            Log.i(TAG, "Posture no longer usable while service running; auto-start disabled -> stopping CoverDisplayService.")
                             CoverDisplayService.stop(activity)
                         }
                         if (check.isRearActive) {
-                            Log.i(TAG, "Device folded. Stopping rear display.")
+                            Log.i(TAG, "Posture no longer usable. Stopping rear display.")
                             stopRearDisplay()
                         }
                     }
@@ -197,15 +291,87 @@ class DualScreenViewModel : ViewModel() {
         }
     }
 
+    /**
+     * React to a freshly settled posture: clear the manual-stop flag and, when auto-start is
+     * enabled, start the cover display service. A resting half-open posture triggers this too.
+     */
+    private fun onPostureSettled(posture: FoldPosture?) {
+        if (posture?.isUsableForCoverDisplay != true) return
+        userManuallyStopped = false
+        if (!_autoStartOnUnfold.value) return
+        if (CoverDisplayService.isServiceRunning.value) return
+        Log.i(TAG, "Settled usable posture $posture; triggering auto-start")
+        attemptAutoStartWithRetry()
+    }
+
+    /**
+     * Attempts the unfold auto-start, retrying a few times with a short backoff because the
+     * cover display frequently is not yet enumerated by DisplayManager at the instant the
+     * fold callback fires. Each attempt re-validates the crash-safe preconditions so we never
+     * create a window on a folded/single-display configuration.
+     */
+    private fun attemptAutoStartWithRetry(attempt: Int = 0, maxAttempts: Int = 4) {
+        val activity = activityRef?.get()
+        if (activity == null) {
+            Log.w(TAG, "Auto-start skipped: activity reference is gone")
+            return
+        }
+        if (userManuallyStopped) return
+        if (!_autoStartOnUnfold.value) return
+
+        // Stop retrying if the posture is no longer usable (folded again in the meantime).
+        if (!canPresentOnSecondaryDisplay.value) {
+            Log.i(TAG, "Auto-start aborted: posture no longer usable")
+            return
+        }
+
+        val isShizukuAuth = ShizukuHelper.isAuthorized.value
+        val serviceRunning = CoverDisplayService.isServiceRunning.value
+        val rearActive = windowAreaHelper.isRearDisplayActive.value
+        val secondaryPresent = DeviceStateMonitor.hasSecondaryDisplay(activity)
+
+        when {
+            isShizukuAuth -> {
+                if (serviceRunning) return
+                // The service itself re-validates and retries internally; starting is safe
+                // even before the display is enumerated.
+                Log.i(TAG, "Unfold auto-start #$attempt via Shizuku CoverDisplayService")
+                DualScreenConfigRepository.updateConfig { it.copy(isPresentationEnabled = true) }
+                CoverDisplayService.start(activity)
+                return
+            }
+
+            secondaryPresent && windowAreaHelper.isRearDisplayAvailable.value -> {
+                if (rearActive) return
+                Log.i(TAG, "Unfold auto-start #$attempt via Samsung rear display (WindowArea)")
+                DualScreenConfigRepository.updateConfig { it.copy(isPresentationEnabled = true) }
+                startRearDisplay(activity)
+                return
+            }
+
+            secondaryPresent && _connectedDisplays.value.isNotEmpty() -> {
+                Log.i(TAG, "Unfold auto-start #$attempt via Presentation")
+                DualScreenConfigRepository.updateConfig { it.copy(isPresentationEnabled = true) }
+                syncPresentation(activity)
+                return
+            }
+        }
+
+        if (attempt < maxAttempts) {
+            Log.d(TAG, "Auto-start deferred: secondary display not ready (attempt=$attempt)")
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(250L * (attempt + 1))
+                attemptAutoStartWithRetry(attempt + 1, maxAttempts)
+            }
+        } else {
+            Log.w(TAG, "Auto-start gave up after $maxAttempts attempts: no secondary display available")
+        }
+    }
+
     private fun observeHelper(helper: DisplayManagerHelper) {
         viewModelScope.launch {
             helper.connectedDisplays.collect { displays ->
                 _connectedDisplays.value = displays
-            }
-        }
-        viewModelScope.launch {
-            helper.activePresentationDisplayId.collect { id ->
-                _activeDisplayId.value = id
             }
         }
         viewModelScope.launch {
@@ -226,6 +392,8 @@ class DualScreenViewModel : ViewModel() {
     fun stopMonitoring() {
         stopDisplayMonitoring()
         foldStateMonitor.stopMonitoring()
+        deviceStateMonitor?.stopListening()
+        deviceStateMonitor = null
         stopRearDisplay()
         activityRef = null
     }
@@ -236,6 +404,15 @@ class DualScreenViewModel : ViewModel() {
      * Otherwise, falls back to WindowArea rear display or Presentation.
      */
     fun toggleRearDisplay(activity: ComponentActivity, enabled: Boolean) {
+        // Anti-mistouch gate: enabling is only allowed while the device is in a *settled*
+        // usable posture (steady OPENED, or a resting half-open posture). We intentionally do
+        // NOT additionally require a secondary display to already exist, because activating
+        // State 4 is what creates the cover display; requiring it here would trap the user
+        // (switch could never be re-enabled after stopping, and auto-start would deadlock).
+        if (enabled && !canPresentOnSecondaryDisplay.value) {
+            Log.w(TAG, "Cannot enable rear display while posture is not usable (anti-accidental touch)")
+            return
+        }
         DualScreenConfigRepository.updateConfig { it.copy(isPresentationEnabled = enabled) }
         if (enabled) {
             userManuallyStopped = false
@@ -260,11 +437,17 @@ class DualScreenViewModel : ViewModel() {
      * Explicit toggle for the Shizuku Background Service mode.
      */
     fun toggleShizukuService(context: Context, enabled: Boolean) {
+        if (enabled && !canPresentOnSecondaryDisplay.value) {
+            Log.w(TAG, "Cannot start Shizuku service while posture is not usable (anti-accidental touch)")
+            return
+        }
         if (enabled) {
             userManuallyStopped = false
+            DualScreenConfigRepository.updateConfig { it.copy(isPresentationEnabled = true) }
             CoverDisplayService.start(context)
         } else {
             userManuallyStopped = true
+            DualScreenConfigRepository.updateConfig { it.copy(isPresentationEnabled = false) }
             CoverDisplayService.stop(context)
         }
     }
@@ -297,8 +480,11 @@ class DualScreenViewModel : ViewModel() {
     fun updateAutoStartOnUnfold(enabled: Boolean) {
         _autoStartOnUnfold.value = enabled
         preferences?.autoStartOnUnfold = enabled
+        activityRef?.get()?.let { activity ->
+            CoverDisplayService.setAutoStartOnUnfold(activity, enabled)
+        }
 
-        if (enabled && foldStateMonitor.isDeviceUnfolded.value) {
+        if (enabled && canPresentOnSecondaryDisplay.value) {
             userManuallyStopped = false
             activityRef?.get()?.let { activity ->
                 if (ShizukuHelper.isAuthorized.value && !CoverDisplayService.isServiceRunning.value) {
@@ -321,6 +507,9 @@ class DualScreenViewModel : ViewModel() {
     fun updateKeepScreenOn(enabled: Boolean) {
         _keepScreenOn.value = enabled
         preferences?.keepScreenOn = enabled
+        activityRef?.get()?.let { activity ->
+            CoverDisplayService.setKeepScreenOn(activity, enabled)
+        }
     }
 
     @VisibleForTesting

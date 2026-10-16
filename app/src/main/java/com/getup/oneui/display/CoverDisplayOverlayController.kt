@@ -33,7 +33,8 @@ import kotlinx.coroutines.flow.StateFlow
 class CoverDisplayOverlayController(
     private val serviceContext: Context,
     val display: Display,
-    private val configFlow: StateFlow<SecondaryDisplayConfig>
+    private val configFlow: StateFlow<SecondaryDisplayConfig>,
+    private var keepScreenOn: Boolean = false
 ) : LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
 
     private val TAG = "CoverOverlayController"
@@ -61,6 +62,14 @@ class CoverDisplayOverlayController(
     fun show(): Boolean {
         if (isShowing) return true
 
+        // Defensive validation: never mount an overlay on an invalid display. Mounting on the
+        // default display while the device is folded produces a window-context conflict crash
+        // (BadTokenException / IllegalStateException), so bail out cleanly instead.
+        if (!display.isValid) {
+            Log.w(TAG, "Refusing to show overlay: target display ${display.displayId} is not valid")
+            return false
+        }
+
         return try {
             savedStateRegistryController.performRestore(null)
             lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
@@ -80,13 +89,18 @@ class CoverDisplayOverlayController(
                 ?: throw IllegalStateException("WindowManager not found in window context")
             windowManager = wm
 
+            // Only add FLAG_KEEP_SCREEN_ON if explicitly enabled by user.
+            // When keepScreenOn is false, FLAG_KEEP_SCREEN_ON must NEVER be present,
+            // allowing system display timeout and auto screen off to function normally.
+            val flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    (if (keepScreenOn) WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON else 0)
+
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                        WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                flags,
                 PixelFormat.TRANSLUCENT
             )
 
@@ -108,12 +122,36 @@ class CoverDisplayOverlayController(
             lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
             lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
             isShowing = true
-            Log.i(TAG, "Cover display overlay window successfully added on display ${display.displayId} (${display.name})")
+            Log.i(TAG, "Cover display overlay window added on display ${display.displayId} (${display.name}), keepScreenOn=$keepScreenOn")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to show cover display overlay window", e)
             dismiss()
             false
+        }
+    }
+
+    /**
+     * Dynamically update the keepScreenOn flag on the active overlay window.
+     */
+    fun updateKeepScreenOn(enabled: Boolean) {
+        keepScreenOn = enabled
+        val view = composeView ?: return
+        val wm = windowManager ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val oldFlags = params.flags
+        params.flags = if (enabled) {
+            params.flags or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        } else {
+            params.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON.inv()
+        }
+        if (params.flags != oldFlags) {
+            try {
+                wm.updateViewLayout(view, params)
+                Log.d(TAG, "Dynamically updated overlay keepScreenOn=$enabled (flags=${params.flags})")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to update overlay layout flags", e)
+            }
         }
     }
 

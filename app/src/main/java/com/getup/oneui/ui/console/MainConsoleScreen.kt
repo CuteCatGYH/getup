@@ -70,6 +70,9 @@ fun MainConsoleScreen(
     val isShizukuRunning by viewModel.isShizukuRunning.collectAsStateWithLifecycle()
     val isShizukuAuthorized by viewModel.isShizukuAuthorized.collectAsStateWithLifecycle()
     val isCoverServiceRunning by viewModel.isCoverServiceRunning.collectAsStateWithLifecycle()
+    val isDeviceUnfolded by viewModel.isDeviceUnfolded.collectAsStateWithLifecycle()
+    val isHalfOpenResting by viewModel.isHalfOpenResting.collectAsStateWithLifecycle()
+    val canPresentOnSecondaryDisplay by viewModel.canPresentOnSecondaryDisplay.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val activity = context as? ComponentActivity
@@ -85,7 +88,13 @@ fun MainConsoleScreen(
         isShizukuRunning = isShizukuRunning,
         isShizukuAuthorized = isShizukuAuthorized,
         isCoverServiceRunning = isCoverServiceRunning,
+        isDeviceUnfolded = isDeviceUnfolded,
+        isHalfOpenResting = isHalfOpenResting,
+        canPresentOnSecondaryDisplay = canPresentOnSecondaryDisplay,
         onToggleRearDisplay = { enabled ->
+            // Hard anti-mistouch guard: only allow enabling when a safe secondary display
+            // target exists. Disabling is always permitted.
+            if (enabled && !canPresentOnSecondaryDisplay) return@MainConsoleContent
             activity?.let { act ->
                 viewModel.toggleRearDisplay(act, enabled)
             } ?: run {
@@ -161,6 +170,9 @@ fun MainConsoleContent(
     isShizukuRunning: Boolean,
     isShizukuAuthorized: Boolean,
     isCoverServiceRunning: Boolean,
+    isDeviceUnfolded: Boolean = true,
+    isHalfOpenResting: Boolean = false,
+    canPresentOnSecondaryDisplay: Boolean = true,
     onToggleRearDisplay: (Boolean) -> Unit,
     onToggleAutoStartOnUnfold: (Boolean) -> Unit,
     onToggleKeepScreenOn: (Boolean) -> Unit,
@@ -272,6 +284,9 @@ fun MainConsoleContent(
                     isShizukuRunning = isShizukuRunning,
                     isShizukuAuthorized = isShizukuAuthorized,
                     isCoverServiceRunning = isCoverServiceRunning,
+                    isDeviceUnfolded = isDeviceUnfolded,
+                    isHalfOpenResting = isHalfOpenResting,
+                    canPresentOnSecondaryDisplay = canPresentOnSecondaryDisplay,
                     selectedDisplayId = uiState.targetDisplayId,
                     onToggleRearDisplay = onToggleRearDisplay,
                     onToggleAutoStartOnUnfold = onToggleAutoStartOnUnfold,

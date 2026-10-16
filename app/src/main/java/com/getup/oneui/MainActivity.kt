@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
                     viewModel.syncPresentation(this@MainActivity)
                 }
 
-                // Keep screen on if requested while any dual-screen mode is active
+                // Keep screen on only if explicitly requested while dual-screen mode is active
                 LaunchedEffect(keepScreenOn, isRearScreenActive) {
                     val window = this@MainActivity.window
                     if (keepScreenOn && isRearScreenActive) {
@@ -62,6 +62,17 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         ShizukuHelper.refreshStatus()
+        if (viewModel.keepScreenOn.value && viewModel.isRearScreenActive.value) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Do not hold keep screen on when MainActivity is in the background
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     override fun onDestroy() {

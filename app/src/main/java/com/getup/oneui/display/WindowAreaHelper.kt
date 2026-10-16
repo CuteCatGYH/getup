@@ -196,13 +196,6 @@ class WindowAreaHelper(
         }
     }
 
-    fun startRearDisplayPresentation(
-        activity: ComponentActivity,
-        configFlow: StateFlow<SecondaryDisplayConfig>
-    ) {
-        startRearDisplay(activity, configFlow)
-    }
-
     /**
      * Stop and close the rear display presentation session.
      */
@@ -216,10 +209,6 @@ class WindowAreaHelper(
             currentSession = null
             _isRearDisplayActive.value = false
         }
-    }
-
-    fun stopRearDisplayPresentation() {
-        stopRearDisplay()
     }
 
     fun destroy() {

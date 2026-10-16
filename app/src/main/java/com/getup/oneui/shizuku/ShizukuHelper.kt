@@ -186,39 +186,33 @@ object ShizukuHelper {
     }
 
     /**
-     * Synchronously execute shell command on IO thread.
-     */
-    fun execCommandBlocking(command: String): Result<String> {
-        if (!Shizuku.pingBinder()) {
-            return Result.failure(IllegalStateException("Shizuku server is not running"))
-        }
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            return Result.failure(SecurityException("Shizuku permission not granted"))
-        }
-
-        return try {
-            val process = createProcess(command)
-            val output = BufferedReader(InputStreamReader(process.inputStream)).use { it.readText().trim() }
-            val error = BufferedReader(InputStreamReader(process.errorStream)).use { it.readText().trim() }
-            val exitCode = process.waitFor()
-
-            if (exitCode == 0) {
-                Result.success(output)
-            } else {
-                Result.failure(Exception("Command exit $exitCode: $error"))
-            }
-        } catch (e: Throwable) {
-            Result.failure(e)
-        }
-    }
-
-    /**
      * Enable or reset dual-screen concurrency state (State 4 = CONCURRENT_INNER_DEFAULT).
      * When [enable] is true: executes 'cmd device_state state 4'.
      * When [enable] is false: executes 'cmd device_state state reset'.
+     *
+     * @param postureValidated when true, the caller (the foreground service / ViewModel) has
+     *   already validated the *authoritative* fold posture against a settle gate, so the
+     *   coarse geometric "is the device folded?" guard is skipped. This is required to allow
+     *   State 4 in a RESTING HALF-OPEN posture, whose default display is the (small) cover
+     *   screen and would otherwise be misread as folded. The geometric guard remains for
+     *   callers that have not done that validation.
      */
-    suspend fun setConcurrentDisplayState(enable: Boolean, packageName: String? = null): Result<String> {
+    suspend fun setConcurrentDisplayState(
+        enable: Boolean,
+        packageName: String? = null,
+        context: Context? = null,
+        postureValidated: Boolean = false
+    ): Result<String> {
         if (enable) {
+            // Anti-accidental touch (防误触): without an authoritative posture check, refuse to
+            // enter State 4 when the device appears folded.
+            if (!postureValidated && context != null &&
+                !com.getup.oneui.display.DeviceStateMonitor.isDeviceUnfolded(context)
+            ) {
+                Log.w(TAG, "Prevented setting State 4: device appears folded (no posture validation provided).")
+                return Result.failure(IllegalStateException("Device is folded; State 4 is prohibited"))
+            }
+
             packageName?.let { pkg ->
                 execCommand("appops set $pkg SYSTEM_ALERT_WINDOW allow")
                 execCommand("pm grant $pkg android.permission.POST_NOTIFICATIONS")
@@ -226,17 +220,6 @@ object ShizukuHelper {
             return execCommand("cmd device_state state 4")
         } else {
             return execCommand("cmd device_state state reset")
-        }
-    }
-
-    /**
-     * Query currently active device state identifier (e.g. 0=CLOSED, 2=HALF_OPENED, 3=OPENED, 4=CONCURRENT).
-     */
-    suspend fun queryDeviceState(): Result<Int> {
-        val result = execCommand("cmd device_state print-state")
-        return result.mapCatching { out ->
-            out.trim().lines().lastOrNull()?.trim()?.toIntOrNull()
-                ?: throw IllegalStateException("Cannot parse device state from '$out'")
         }
     }
 }

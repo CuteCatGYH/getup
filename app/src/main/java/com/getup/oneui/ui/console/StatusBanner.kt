@@ -75,6 +75,9 @@ fun StatusBanner(
     isShizukuRunning: Boolean = true,
     isShizukuAuthorized: Boolean = false,
     isCoverServiceRunning: Boolean = false,
+    isDeviceUnfolded: Boolean = true,
+    isHalfOpenResting: Boolean = false,
+    canPresentOnSecondaryDisplay: Boolean = true,
     selectedDisplayId: Int?,
     onToggleRearDisplay: (Boolean) -> Unit,
     onToggleAutoStartOnUnfold: (Boolean) -> Unit,
@@ -85,26 +88,31 @@ fun StatusBanner(
     modifier: Modifier = Modifier
 ) {
     val isExternalConnected = connectedDisplays.isNotEmpty()
+    // "Usable" posture = settled OPENED or a resting half-open posture. Drives enable/visual
+    // state so the console correctly allows (and looks enabled in) a stable half-open stance.
+    val isPostureUsable = canPresentOnSecondaryDisplay
     var displayDropdownExpanded by remember { mutableStateOf(false) }
 
     val activeDisplay = connectedDisplays.find { it.id == selectedDisplayId } ?: connectedDisplays.firstOrNull()
 
     val cardBorderColor by animateColorAsState(
-        targetValue = if (isRearScreenActive || isCoverServiceRunning) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+        targetValue = if ((isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
         else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
         animationSpec = tween(300),
         label = "cardBorderColor"
     )
 
     val containerColor by animateColorAsState(
-        targetValue = if (isRearScreenActive || isCoverServiceRunning) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+        targetValue = if ((isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
         else MaterialTheme.colorScheme.surfaceContainerHigh,
         animationSpec = tween(300),
         label = "containerColor"
     )
 
     val statusDotColor by animateColorAsState(
-        targetValue = if (isRearScreenActive || isCoverServiceRunning) Color(0xFF00E676) else Color(0xFF9E9E9E),
+        targetValue = if ((isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded) Color(0xFF00E676)
+        else if (!isDeviceUnfolded) MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
+        else Color(0xFF9E9E9E),
         animationSpec = tween(300),
         label = "statusDotColor"
     )
@@ -115,7 +123,7 @@ fun StatusBanner(
             .border(1.dp, cardBorderColor, RoundedCornerShape(24.dp)),
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = containerColor),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (isRearScreenActive || isCoverServiceRunning) 4.dp else 1.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = if ((isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded) 4.dp else 1.dp)
     ) {
         Column(
             modifier = Modifier
@@ -131,8 +139,10 @@ fun StatusBanner(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = when {
+                            !canPresentOnSecondaryDisplay -> "设备处于折叠闭合状态 (外屏就绪)"
                             isCoverServiceRunning -> "外屏常驻服务运行中 (State 4 提权)"
                             isRearScreenActive -> "外屏显示已开启"
+                            isHalfOpenResting -> "检测到半遮（半开）姿态 (背屏可用)"
                             isRearDisplayAvailable -> "检测到三星外屏 (背屏并发就绪)"
                             isExternalConnected -> "检测到外接副屏 (${connectedDisplays.size}个显示器就绪)"
                             else -> "副屏虚拟镜像已就绪"
@@ -144,24 +154,28 @@ fun StatusBanner(
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = when {
+                            !canPresentOnSecondaryDisplay -> "请先展开内屏或半遮背屏后再开启背屏显示"
                             isCoverServiceRunning -> "Display 1 · 锁屏/切换应用保持常亮"
+                            isHalfOpenResting -> "半遮稳定态 · 可直接开启背屏显示"
                             isRearDisplayAvailable -> "Samsung Foldable · WindowArea / Shizuku"
                             isExternalConnected -> "Secondary Display · Presentation Mode"
                             else -> "Virtual Canvas · Real-time Mirror"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = if (!canPresentOnSecondaryDisplay) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
 
                 // Status Indicator Pill with pulsing dot
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = if (isRearScreenActive || isCoverServiceRunning) Color(0xFF00E676).copy(alpha = 0.15f)
+                    color = if ((isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded) Color(0xFF00E676).copy(alpha = 0.15f)
+                    else if (!isDeviceUnfolded) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f)
                     else MaterialTheme.colorScheme.surfaceVariant,
                     border = BorderStroke(
                         1.dp,
-                        if (isRearScreenActive || isCoverServiceRunning) Color(0xFF00E676).copy(alpha = 0.4f)
+                        if ((isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded) Color(0xFF00E676).copy(alpha = 0.4f)
+                        else if (!isDeviceUnfolded) MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
                         else MaterialTheme.colorScheme.outlineVariant
                     )
                 ) {
@@ -186,18 +200,25 @@ fun StatusBanner(
                                 .size(8.dp)
                                 .clip(CircleShape)
                                 .background(
-                                    if (isRearScreenActive || isCoverServiceRunning)
+                                    if ((isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded)
                                         statusDotColor.copy(alpha = pulseAlpha)
                                     else
                                         statusDotColor
                                 )
                         )
                         Text(
-                            text = if (isRearScreenActive || isCoverServiceRunning) "已开启" else "已休眠",
+                            text = when {
+                                (isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded -> "已开启"
+                                !isDeviceUnfolded -> "已闭合"
+                                else -> "已休眠"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            color = if (isRearScreenActive || isCoverServiceRunning) Color(0xFF00C853)
-                            else MaterialTheme.colorScheme.onSurfaceVariant
+                            color = when {
+                                (isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded -> Color(0xFF00C853)
+                                !isDeviceUnfolded -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
                         )
                     }
                 }
@@ -208,13 +229,13 @@ fun StatusBanner(
             // 2. High-Visibility Main Action Control Card
             Surface(
                 shape = RoundedCornerShape(18.dp),
-                color = if (isRearScreenActive || isCoverServiceRunning)
+                color = if ((isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded)
                     MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
                 else
                     MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
                 border = BorderStroke(
                     1.5.dp,
-                    if (isRearScreenActive || isCoverServiceRunning) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                    if ((isRearScreenActive || isCoverServiceRunning) && isDeviceUnfolded) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
                     else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
                 ),
                 modifier = Modifier.fillMaxWidth()
@@ -235,7 +256,9 @@ fun StatusBanner(
                                 .size(44.dp)
                                 .clip(RoundedCornerShape(14.dp))
                                 .background(
-                                    if (isRearScreenActive || isCoverServiceRunning)
+                                    if (!isPostureUsable)
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                    else if (isRearScreenActive || isCoverServiceRunning)
                                         MaterialTheme.colorScheme.primary
                                     else
                                         MaterialTheme.colorScheme.surfaceVariant
@@ -245,7 +268,9 @@ fun StatusBanner(
                             Icon(
                                 imageVector = Icons.Default.PowerSettingsNew,
                                 contentDescription = null,
-                                tint = if (isRearScreenActive || isCoverServiceRunning)
+                                tint = if (!isPostureUsable)
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                else if (isRearScreenActive || isCoverServiceRunning)
                                     MaterialTheme.colorScheme.onPrimary
                                 else
                                     MaterialTheme.colorScheme.onSurfaceVariant,
@@ -260,16 +285,19 @@ fun StatusBanner(
                                 text = "外屏背屏显示",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
+                                color = if (isPostureUsable) MaterialTheme.colorScheme.onSurface
+                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = if (isRearScreenActive || isCoverServiceRunning)
-                                    "外屏正在运行时钟与标语"
-                                else
-                                    "点击开关立即点亮外屏",
+                                text = when {
+                                    !isPostureUsable -> "请先展开内屏或半遮背屏后再开启背屏"
+                                    isRearScreenActive || isCoverServiceRunning -> "外屏正在运行时钟与标语"
+                                    else -> "点击开关立即点亮外屏"
+                                },
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = if (!isPostureUsable) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
@@ -277,8 +305,15 @@ fun StatusBanner(
                     Spacer(modifier = Modifier.width(8.dp))
 
                     Switch(
-                        checked = isRearScreenActive || isCoverServiceRunning,
-                        onCheckedChange = onToggleRearDisplay
+                        checked = (isRearScreenActive || isCoverServiceRunning) && isPostureUsable,
+                        onCheckedChange = { checked ->
+                            // Hard anti-mistouch gate: enabling requires a safe secondary
+                            // display target (unfolded/half-open + secondary present). Diabling
+                            // is always allowed so the user can never get stuck.
+                            if (checked && !canPresentOnSecondaryDisplay) return@Switch
+                            onToggleRearDisplay(checked)
+                        },
+                        enabled = canPresentOnSecondaryDisplay || isRearScreenActive || isCoverServiceRunning
                     )
                 }
             }
@@ -543,13 +578,14 @@ fun StatusBanner(
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = if (isCoverServiceRunning)
-                                        "前台服务运行中 · 锁屏/切后台外屏持续显示"
-                                    else
-                                        "已提权 · 开启后退出应用或锁屏外屏仍常驻",
+                                    text = when {
+                                        !isPostureUsable -> "设备处于折叠状态 · 请展开大屏或半遮背屏后开启"
+                                        isCoverServiceRunning -> "前台服务运行中 · 锁屏/切后台外屏持续显示"
+                                        else -> "已提权 · 开启后退出应用或锁屏外屏仍常驻"
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = if (!isPostureUsable) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
@@ -557,8 +593,12 @@ fun StatusBanner(
                         Spacer(modifier = Modifier.width(8.dp))
 
                         Switch(
-                            checked = isCoverServiceRunning,
-                            onCheckedChange = onToggleCoverService
+                            checked = isCoverServiceRunning && isPostureUsable,
+                            onCheckedChange = { checked ->
+                                if (checked && !canPresentOnSecondaryDisplay) return@Switch
+                                onToggleCoverService(checked)
+                            },
+                            enabled = canPresentOnSecondaryDisplay || isCoverServiceRunning
                         )
                     }
                 }

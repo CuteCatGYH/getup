@@ -190,4 +190,17 @@ class DualScreenViewModelTest {
         assertEquals(testSlogan, viewModel.uiState.value.sloganConfig.text)
         assertEquals(testSlogan, com.getup.oneui.model.DualScreenConfigRepository.config.value.sloganConfig.text)
     }
+
+    @Test
+    fun testAntiMisoperationWhenFolded() {
+        // Device is folded by default
+        assertFalse(viewModel.isDeviceUnfolded.value)
+
+        // Attempting to toggle Shizuku service while folded should be prohibited
+        val dummyContext = object : android.content.ContextWrapper(null) {}
+        viewModel.toggleShizukuService(dummyContext, true)
+
+        // Configuration presentation should NOT be enabled because device is folded
+        assertFalse(viewModel.isRearScreenActive.value)
+    }
 }
