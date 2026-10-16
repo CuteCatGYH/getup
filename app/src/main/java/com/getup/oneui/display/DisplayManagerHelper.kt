@@ -132,9 +132,15 @@ class DisplayManagerHelper(private val context: Context) {
             displays.first()
         }
 
+        val freshDisplay = displayManager.getDisplay(targetDisplay.displayId)
+        if (freshDisplay == null || !freshDisplay.isValid) {
+            Log.w(TAG, "Target display ${targetDisplay.displayId} is not valid yet.")
+            return false
+        }
+
         // If presentation is already showing on this target display, do nothing
         if (activePresentation != null &&
-            _activePresentationDisplayId.value == targetDisplay.displayId &&
+            _activePresentationDisplayId.value == freshDisplay.displayId &&
             activePresentation?.isShowing == true
         ) {
             return true
@@ -146,15 +152,15 @@ class DisplayManagerHelper(private val context: Context) {
         return try {
             val presentation = SecondaryDisplayPresentation(
                 outerContext = context,
-                display = targetDisplay,
+                display = freshDisplay,
                 configFlow = configFlow,
                 content = content
             )
             presentation.show()
             activePresentation = presentation
-            _activePresentationDisplayId.value = targetDisplay.displayId
+            _activePresentationDisplayId.value = freshDisplay.displayId
             _isPresentationShowing.value = true
-            Log.i(TAG, "Presentation successfully shown on display: ${targetDisplay.displayId} (${targetDisplay.name})")
+            Log.i(TAG, "Presentation successfully shown on display: ${freshDisplay.displayId} (${freshDisplay.name})")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to show presentation on display ${targetDisplay.displayId}", e)

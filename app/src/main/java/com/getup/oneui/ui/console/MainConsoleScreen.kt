@@ -1,5 +1,6 @@
 package com.getup.oneui.ui.console
 
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -12,9 +13,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -23,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -48,7 +52,8 @@ import kotlinx.coroutines.launch
 
 /**
  * Main Console Screen managing secondary display presentation settings,
- * status monitoring, live mirror preview rendering, and customization controls.
+ * status monitoring, live mirror preview rendering, customization controls,
+ * and Shizuku elevated background concurrency.
  */
 @Composable
 fun MainConsoleScreen(
@@ -57,16 +62,48 @@ fun MainConsoleScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val connectedDisplays by viewModel.connectedDisplays.collectAsStateWithLifecycle()
-    val isPresentationShowing by viewModel.isPresentationShowing.collectAsStateWithLifecycle()
+    val isRearDisplayAvailable by viewModel.isRearDisplayAvailable.collectAsStateWithLifecycle()
+    val isRearScreenActive by viewModel.isRearScreenActive.collectAsStateWithLifecycle()
+    val autoStartOnUnfold by viewModel.autoStartOnUnfold.collectAsStateWithLifecycle()
+    val keepScreenOn by viewModel.keepScreenOn.collectAsStateWithLifecycle()
+    val isShizukuInstalled by viewModel.isShizukuInstalled.collectAsStateWithLifecycle()
+    val isShizukuRunning by viewModel.isShizukuRunning.collectAsStateWithLifecycle()
+    val isShizukuAuthorized by viewModel.isShizukuAuthorized.collectAsStateWithLifecycle()
+    val isCoverServiceRunning by viewModel.isCoverServiceRunning.collectAsStateWithLifecycle()
+
     val context = LocalContext.current
+    val activity = context as? ComponentActivity
 
     MainConsoleContent(
         uiState = uiState,
         connectedDisplays = connectedDisplays,
-        isPresentationShowing = isPresentationShowing,
-        onTogglePresentation = { enabled ->
-            viewModel.togglePresentation(enabled)
-            viewModel.syncPresentation(context)
+        isRearDisplayAvailable = isRearDisplayAvailable,
+        isRearScreenActive = isRearScreenActive,
+        autoStartOnUnfold = autoStartOnUnfold,
+        keepScreenOn = keepScreenOn,
+        isShizukuInstalled = isShizukuInstalled,
+        isShizukuRunning = isShizukuRunning,
+        isShizukuAuthorized = isShizukuAuthorized,
+        isCoverServiceRunning = isCoverServiceRunning,
+        onToggleRearDisplay = { enabled ->
+            activity?.let { act ->
+                viewModel.toggleRearDisplay(act, enabled)
+            } ?: run {
+                viewModel.togglePresentation(enabled)
+                viewModel.syncPresentation(context)
+            }
+        },
+        onToggleAutoStartOnUnfold = { enabled ->
+            viewModel.updateAutoStartOnUnfold(enabled)
+        },
+        onToggleKeepScreenOn = { enabled ->
+            viewModel.updateKeepScreenOn(enabled)
+        },
+        onRequestShizukuPermission = {
+            viewModel.requestShizukuPermission()
+        },
+        onToggleCoverService = { enabled ->
+            viewModel.toggleShizukuService(context, enabled)
         },
         onSelectTargetDisplay = { id ->
             viewModel.selectTargetDisplay(id)
@@ -116,8 +153,19 @@ fun MainConsoleScreen(
 fun MainConsoleContent(
     uiState: SecondaryDisplayConfig,
     connectedDisplays: List<DisplayInfo>,
-    isPresentationShowing: Boolean,
-    onTogglePresentation: (Boolean) -> Unit,
+    isRearDisplayAvailable: Boolean,
+    isRearScreenActive: Boolean,
+    autoStartOnUnfold: Boolean,
+    keepScreenOn: Boolean,
+    isShizukuInstalled: Boolean,
+    isShizukuRunning: Boolean,
+    isShizukuAuthorized: Boolean,
+    isCoverServiceRunning: Boolean,
+    onToggleRearDisplay: (Boolean) -> Unit,
+    onToggleAutoStartOnUnfold: (Boolean) -> Unit,
+    onToggleKeepScreenOn: (Boolean) -> Unit,
+    onRequestShizukuPermission: () -> Unit,
+    onToggleCoverService: (Boolean) -> Unit,
     onSelectTargetDisplay: (Int?) -> Unit,
     onClockStyleChange: (ClockStyle) -> Unit,
     on24HourFormatChange: (Boolean) -> Unit,
@@ -153,6 +201,35 @@ fun MainConsoleContent(
                     }
                 },
                 actions = {
+                    // Shizuku Status Badge
+                    if (isShizukuAuthorized) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.padding(end = 4.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.VerifiedUser,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Shizuku 就绪",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+                    }
+
+                    // Reset Defaults
                     IconButton(
                         onClick = {
                             onResetDefaults()
@@ -181,14 +258,26 @@ fun MainConsoleContent(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 1. Secondary Screen Status Banner with activation toggle
+            // 1. Dual Control Status Banner:
+            // High-visibility "外屏背屏显示" 主开关, "展开大屏时自动开启" 开关,
+            // "背屏开启时保持常亮" 开关, and Shizuku elevated concurrency controls
             item {
                 StatusBanner(
                     connectedDisplays = connectedDisplays,
-                    isPresentationEnabled = uiState.isPresentationEnabled,
-                    isPresentationShowing = isPresentationShowing,
+                    isRearDisplayAvailable = isRearDisplayAvailable,
+                    isRearScreenActive = isRearScreenActive,
+                    autoStartOnUnfold = autoStartOnUnfold,
+                    keepScreenOn = keepScreenOn,
+                    isShizukuInstalled = isShizukuInstalled,
+                    isShizukuRunning = isShizukuRunning,
+                    isShizukuAuthorized = isShizukuAuthorized,
+                    isCoverServiceRunning = isCoverServiceRunning,
                     selectedDisplayId = uiState.targetDisplayId,
-                    onTogglePresentation = onTogglePresentation,
+                    onToggleRearDisplay = onToggleRearDisplay,
+                    onToggleAutoStartOnUnfold = onToggleAutoStartOnUnfold,
+                    onToggleKeepScreenOn = onToggleKeepScreenOn,
+                    onRequestShizukuPermission = onRequestShizukuPermission,
+                    onToggleCoverService = onToggleCoverService,
                     onSelectTargetDisplay = onSelectTargetDisplay
                 )
             }
@@ -197,28 +286,11 @@ fun MainConsoleContent(
             item {
                 PreviewMirrorCard(
                     config = uiState,
-                    isPresentationShowing = isPresentationShowing
+                    isPresentationShowing = isRearScreenActive || isCoverServiceRunning
                 )
             }
 
-            // Section Header
-            item {
-                Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                    Text(
-                        text = "Display Style Customization",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "Customize the visual layout rendered on the secondary/cover display in real-time.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            // 3. Control Panels
+            // 3. Clock Style Customization Panel
             item {
                 ClockControlPanel(
                     clockStyle = uiState.clockStyle,
@@ -230,13 +302,7 @@ fun MainConsoleContent(
                 )
             }
 
-            item {
-                SloganControlPanel(
-                    sloganConfig = uiState.sloganConfig,
-                    onSloganConfigChange = onSloganConfigChange
-                )
-            }
-
+            // 4. Wallpaper and Background Customization Panel
             item {
                 WallpaperControlPanel(
                     wallpaper = uiState.wallpaper,
@@ -246,6 +312,15 @@ fun MainConsoleContent(
                 )
             }
 
+            // 5. Motivational Slogan Customization Panel
+            item {
+                SloganControlPanel(
+                    sloganConfig = uiState.sloganConfig,
+                    onSloganConfigChange = onSloganConfigChange
+                )
+            }
+
+            // 6. Battery Level Display Customization Panel
             item {
                 BatteryControlPanel(
                     batteryOption = uiState.batteryOption,
@@ -253,24 +328,34 @@ fun MainConsoleContent(
                 )
             }
 
+            // Bottom Spacing for navigation bar inset clearance
             item {
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(32.dp))
             }
         }
     }
 }
 
-@Preview(showBackground = true, widthDp = 380, heightDp = 800)
+@Preview(showBackground = true, device = "spec:width=411dp,height=891dp")
 @Composable
-fun MainConsoleContentPreview() {
+fun MainConsoleScreenPreview() {
     双屏并发Theme {
         MainConsoleContent(
             uiState = SecondaryDisplayConfig(),
-            connectedDisplays = listOf(
-                DisplayInfo(id = 1, name = "Cover Screen", width = 1080, height = 1080, refreshRate = 120f, isPresentationDisplay = true)
-            ),
-            isPresentationShowing = true,
-            onTogglePresentation = {},
+            connectedDisplays = emptyList(),
+            isRearDisplayAvailable = true,
+            isRearScreenActive = true,
+            autoStartOnUnfold = true,
+            keepScreenOn = true,
+            isShizukuInstalled = true,
+            isShizukuRunning = true,
+            isShizukuAuthorized = true,
+            isCoverServiceRunning = true,
+            onToggleRearDisplay = {},
+            onToggleAutoStartOnUnfold = {},
+            onToggleKeepScreenOn = {},
+            onRequestShizukuPermission = {},
+            onToggleCoverService = {},
             onSelectTargetDisplay = {},
             onClockStyleChange = {},
             on24HourFormatChange = {},

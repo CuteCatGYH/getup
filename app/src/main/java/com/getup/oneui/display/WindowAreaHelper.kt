@@ -3,8 +3,7 @@ package com.getup.oneui.display
 import android.os.Binder
 import android.util.Log
 import androidx.activity.ComponentActivity
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -16,11 +15,14 @@ import androidx.window.area.WindowAreaInfo
 import androidx.window.area.WindowAreaPresentationSessionCallback
 import androidx.window.area.WindowAreaSessionPresenter
 import androidx.window.core.ExperimentalWindowApi
+import com.getup.oneui.model.SecondaryDisplayConfig
+import com.getup.oneui.ui.presentation.PresentationScreen
 import com.getup.oneui.ui.theme.双屏并发Theme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -36,8 +38,13 @@ class WindowAreaHelper(
 ) {
     private val TAG = "WindowAreaHelper"
 
-    private val windowAreaController: WindowAreaController by lazy {
-        WindowAreaController.getOrCreate()
+    private val windowAreaController: WindowAreaController? by lazy {
+        try {
+            WindowAreaController.getOrCreate()
+        } catch (t: Throwable) {
+            Log.w(TAG, "WindowAreaController not available", t)
+            null
+        }
     }
 
     private val _isRearDisplayAvailable = MutableStateFlow(false)
@@ -49,8 +56,6 @@ class WindowAreaHelper(
     private var rearAreaInfo: WindowAreaInfo? = null
     private var currentSession: WindowAreaSessionPresenter? = null
 
-    private val composableContent = mutableStateOf<(@Composable () -> Unit)?>(null)
-
     init {
         startObservingWindowAreas()
     }
@@ -58,7 +63,8 @@ class WindowAreaHelper(
     private fun startObservingWindowAreas() {
         coroutineScope.launch {
             try {
-                windowAreaController.windowAreaInfos.collect { windowAreaInfos ->
+                val controller = windowAreaController ?: return@launch
+                controller.windowAreaInfos.collect { windowAreaInfos ->
                     Log.d(TAG, "Received windowAreaInfos count: ${windowAreaInfos.size}")
                     val rearInfo = windowAreaInfos.firstOrNull { it.type == WindowAreaInfo.Type.TYPE_REAR_FACING }
                     rearAreaInfo = rearInfo
@@ -90,10 +96,16 @@ class WindowAreaHelper(
      * Uses [ComponentActivity] to bind view tree lifecycle, saved state, and view model stores
      * so that the Jetpack Compose hierarchy runs smoothly inside the presentation session.
      */
-    fun startRearDisplayPresentation(
+    fun startRearDisplay(
         activity: ComponentActivity,
-        content: @Composable () -> Unit
+        configFlow: StateFlow<SecondaryDisplayConfig>
     ) {
+        val controller = windowAreaController
+        if (controller == null) {
+            Log.w(TAG, "Cannot start rear display: WindowAreaController is null")
+            return
+        }
+
         val info = rearAreaInfo
         if (info == null) {
             Log.w(TAG, "Cannot start rear display presentation: rearAreaInfo is null")
@@ -108,10 +120,8 @@ class WindowAreaHelper(
             return
         }
 
-        composableContent.value = content
-
         if (currentSession != null && _isRearDisplayActive.value) {
-            Log.d(TAG, "Rear display presentation already active, content updated.")
+            Log.d(TAG, "Rear display presentation already active.")
             return
         }
 
@@ -124,19 +134,37 @@ class WindowAreaHelper(
                 currentSession = session
                 _isRearDisplayActive.value = true
 
-                val composeView = ComposeView(session.context).apply {
-                    setViewTreeLifecycleOwner(activity)
-                    setViewTreeSavedStateRegistryOwner(activity)
-                    setViewTreeViewModelStoreOwner(activity)
+                fun trySetContentView(attempt: Int = 1) {
+                    try {
+                        val composeView = ComposeView(session.context).apply {
+                            setViewTreeLifecycleOwner(activity)
+                            setViewTreeSavedStateRegistryOwner(activity)
+                            setViewTreeViewModelStoreOwner(activity)
 
-                    setContent {
-                        双屏并发Theme {
-                            composableContent.value?.invoke()
+                            setContent {
+                                双屏并发Theme {
+                                    val currentConfig = configFlow.collectAsState().value
+                                    PresentationScreen(config = currentConfig)
+                                }
+                            }
+                        }
+
+                        session.setContentView(composeView)
+                        Log.i(TAG, "session.setContentView succeeded on attempt $attempt")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "setContentView failed on attempt $attempt: ${e.message}")
+                        if (attempt < 5 && currentSession != null) {
+                            coroutineScope.launch {
+                                delay(150L * attempt)
+                                trySetContentView(attempt + 1)
+                            }
+                        } else {
+                            Log.e(TAG, "setContentView permanently failed after $attempt attempts", e)
                         }
                     }
                 }
 
-                session.setContentView(composeView)
+                trySetContentView(1)
             }
 
             override fun onSessionEnded(t: Throwable?) {
@@ -155,7 +183,7 @@ class WindowAreaHelper(
         }
 
         try {
-            windowAreaController.presentContentOnWindowArea(
+            controller.presentContentOnWindowArea(
                 token = token,
                 activity = activity,
                 executor = executor,
@@ -168,10 +196,17 @@ class WindowAreaHelper(
         }
     }
 
+    fun startRearDisplayPresentation(
+        activity: ComponentActivity,
+        configFlow: StateFlow<SecondaryDisplayConfig>
+    ) {
+        startRearDisplay(activity, configFlow)
+    }
+
     /**
      * Stop and close the rear display presentation session.
      */
-    fun stopRearDisplayPresentation() {
+    fun stopRearDisplay() {
         Log.d(TAG, "Stopping rear display presentation")
         try {
             currentSession?.close()
@@ -183,8 +218,12 @@ class WindowAreaHelper(
         }
     }
 
+    fun stopRearDisplayPresentation() {
+        stopRearDisplay()
+    }
+
     fun destroy() {
-        stopRearDisplayPresentation()
+        stopRearDisplay()
         coroutineScope.cancel()
     }
 }

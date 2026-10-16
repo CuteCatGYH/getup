@@ -2,6 +2,7 @@ package com.getup.oneui.viewmodel
 
 import com.getup.oneui.model.BatteryDisplayOption
 import com.getup.oneui.model.ClockStyle
+import com.getup.oneui.model.SecondaryDisplayConfig
 import com.getup.oneui.model.SloganConfig
 import com.getup.oneui.model.WallpaperOption
 import kotlinx.coroutines.Dispatchers
@@ -12,6 +13,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -25,6 +27,7 @@ class DualScreenViewModelTest {
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
+        com.getup.oneui.model.DualScreenConfigRepository.setConfig(SecondaryDisplayConfig())
         viewModel = DualScreenViewModel()
     }
 
@@ -124,5 +127,67 @@ class DualScreenViewModelTest {
         assertEquals(ClockStyle.DIGITAL_BOLD, resetState.clockStyle)
         assertEquals("Welcome to Dual Screen Console", resetState.sloganConfig.text)
         assertTrue(resetState.isPresentationEnabled)
+    }
+
+    @Test
+    fun testAutoStartOnUnfoldPreference() {
+        // Initial state should be true (or default configured)
+        assertTrue(viewModel.autoStartOnUnfold.value)
+
+        // User toggles off "展开大屏时自动开启"
+        viewModel.setAutoStartOnUnfoldForTest(false)
+        assertFalse(viewModel.autoStartOnUnfold.value)
+
+        // User toggles back on
+        viewModel.setAutoStartOnUnfoldForTest(true)
+        assertTrue(viewModel.autoStartOnUnfold.value)
+    }
+
+    @Test
+    fun testFoldStateMonitorIntegration() {
+        assertNotNull(viewModel.foldStateMonitor)
+        assertFalse(viewModel.isDeviceUnfolded.value)
+
+        viewModel.foldStateMonitor.setDeviceUnfoldedForTest(true)
+        assertTrue(viewModel.isDeviceUnfolded.value)
+
+        viewModel.foldStateMonitor.setDeviceUnfoldedForTest(false)
+        assertFalse(viewModel.isDeviceUnfolded.value)
+    }
+
+    @Test
+    fun testWindowAreaHelperIntegration() {
+        assertNotNull(viewModel.windowAreaHelper)
+        assertFalse(viewModel.isRearDisplayActive.value)
+        assertFalse(viewModel.isRearScreenActive.value)
+    }
+
+    @Test
+    fun testKeepScreenOnPreference() {
+        // Initial state should be true (default)
+        assertTrue(viewModel.keepScreenOn.value)
+
+        // Toggle keep screen on off
+        viewModel.setKeepScreenOnForTest(false)
+        assertFalse(viewModel.keepScreenOn.value)
+
+        // Toggle back on
+        viewModel.setKeepScreenOnForTest(true)
+        assertTrue(viewModel.keepScreenOn.value)
+    }
+
+    @Test
+    fun testShizukuInitialState() {
+        // Without binder or permission, authorized should be false
+        assertFalse(viewModel.isShizukuAuthorized.value)
+        assertFalse(viewModel.isCoverServiceRunning.value)
+    }
+
+    @Test
+    fun testSharedConfigSync() {
+        val testSlogan = "Keep Moving Forward"
+        viewModel.updateSloganText(testSlogan)
+        assertEquals(testSlogan, viewModel.uiState.value.sloganConfig.text)
+        assertEquals(testSlogan, com.getup.oneui.model.DualScreenConfigRepository.config.value.sloganConfig.text)
     }
 }
